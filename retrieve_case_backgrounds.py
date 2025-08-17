@@ -99,6 +99,12 @@ class HeadingInfo:
         """
         text = self.normalized_text.strip()
         
+        # 检查单独的罗马数字（带或不带点号）
+        match = re.match(r'^\s*([IVX]+)\.?\s*$', text)
+        if match:
+            roman_val = self._roman_to_int(match.group(1))
+            return {"type": "roman_only", "value": roman_val, "text": match.group(1)}
+        
         match = re.match(r'^\s*\*\*([0-9]+)', text)
         if match:
             return {"type": "double_star_number", "value": int(match.group(1))}
@@ -121,7 +127,7 @@ class HeadingInfo:
             return {"type": "letter", "value": ord(match.group(1)) - ord('A') + 1, "text": match.group(1)}
         
         return None
-    
+
     def _roman_to_int(self, roman: str) -> int:
         """
         Convert a Roman numeral string to integer.
@@ -227,6 +233,42 @@ def analyze_heading_level(line: str) -> int:
     """
     line = line.strip()
     
+    if re.match(r'^\s*[IVX]+\s*$', line):
+        return 1
+    
+    if re.match(r'^\s*[IVX]+\.\s+[A-Z]', line):
+        return 1
+    if re.match(r'^\s*[0-9]+\.\s+[A-Z]', line) and len(line.split()) <= 5:
+        return 1
+    if re.match(r'^\s*\*\*[0-9]+', line):
+        return 1
+    if re.match(r'^\s*\*[0-9]+', line):
+        return 1
+    if line.isupper() and len(line.split()) <= 4 and not line.endswith(':'):
+        return 1
+    
+    if re.match(r'^\s*[A-Z]\.\s+[A-Z]', line):
+        return 2
+    if re.match(r'^\s*\([0-9]+\)\s+[A-Z]', line):
+        return 2
+    if re.match(r'^\s*\([IVX]+\)\s+[A-Z]', line):
+        return 2
+    
+    if re.match(r'^\s*\([A-Z]\)\s+[A-Z]', line):
+        return 3
+    if line.endswith(':') and len(line.split()) <= 6:
+        return 3
+    
+    return 2
+    """
+    Analyze heading level based on text pattern.
+    Args:
+        line (str): Input text line.
+    Returns:
+        int: Heading level (1, 2, or 3).
+    """
+    line = line.strip()
+    
     if re.match(r'^\s*[IVX]+\.\s+[A-Z]', line):
         return 1
     if re.match(r'^\s*[0-9]+\.\s+[A-Z]', line) and len(line.split()) <= 5:
@@ -262,8 +304,12 @@ def is_heading(line: str) -> bool:
     """
     line = line.strip()
         
-    if len(line) > 45 or len(line) < 3:
+    if len(line) > 45 or len(line) < 1:  # 改为1以支持单个罗马数字
         return False
+    
+    # 检查是否为单独的罗马数字标题（带或不带点号）
+    if re.match(r'^\s*[IVX]+\.?\s*$', line):
+        return True
     
     numbered_patterns = [
         r'^\s*[IVX]+\.\s+[A-Z]',
@@ -380,9 +426,10 @@ def find_all_headings(text: str, page_info: List[Tuple[int, str]]) -> List[Headi
     
     return headings
 
+
 def find_target_heading(headings: List[HeadingInfo]) -> Optional[HeadingInfo]:
     """
-    Find the target heading containing 'fact' or 'background'.
+    Find the target heading containing 'fact' or 'background', or Roman numeral I.
     Args:
         headings (List[HeadingInfo]): List of HeadingInfo objects.
     Returns:
@@ -390,9 +437,9 @@ def find_target_heading(headings: List[HeadingInfo]) -> Optional[HeadingInfo]:
     """
     target_keywords = ['fact', 'background']
     
+    # 首先查找包含关键词的标题
     for heading in headings:
         search_text = heading.normalized_text.lower()
-        
         original_text = heading.text.lower()
         
         logger.info(f"  Checking heading: '{heading.text}'")
@@ -407,9 +454,18 @@ def find_target_heading(headings: List[HeadingInfo]) -> Optional[HeadingInfo]:
                 logger.info(f"  Heading level: {heading.level}, Formatting: {heading.formatting_signature}")
                 return heading
     
+    # 如果没找到关键词标题，查找罗马数字I（带或不带点号）
+    for heading in headings:
+        heading_text = heading.text.strip()
+        # 检查是否为单独的 "I" 或 "I."
+        if re.match(r'^\s*I\.?\s*$', heading_text):
+            logger.info(f"  Found Roman numeral I heading: '{heading.text}'")
+            logger.info(f"  Raw text: '{heading.raw_text}'")
+            return heading
+    
     logger.info("  No matching heading found. All headings:")
     for i, heading in enumerate(headings):
-        logger.info(f"    {i+1}. '{heading.text}' -> normalized: '{heading.normalized_text}'")
+        logger.info(f"    {i+1}. '{heading.text}' -> normalized: '{heading.normalized_text}' -> raw: '{heading.raw_text}'")
     
     return None
 
@@ -562,7 +618,7 @@ def extract_synopsis_section(text: str) -> str:
 
 def extract_background_section(text: str, page_info: List[Tuple[int, str]]) -> Tuple[str, bool]:
     """
-    Extract the Background section from the document.
+    Extract the Background section from the document, including Roman numeral sections I-III (or up to the last available).
     Args:
         text (str): Full text of the document.
         page_info (List[Tuple[int, str]]): List of (page_num, text) tuples.
@@ -580,18 +636,99 @@ def extract_background_section(text: str, page_info: List[Tuple[int, str]]) -> T
     target_heading = find_target_heading(headings)
     
     if not target_heading:
-        logger.warning("  No background or fact headings found")
+        logger.warning("  No background, fact headings, or Roman numeral I found")
         return "Background not found - no matching headings", True
     
-    next_heading = find_next_same_level_heading(target_heading, headings)
+    # 检查是否为罗马数字I，如果是，提取I-III的内容（或到最后一个可用的罗马数字）
+    if re.match(r'^\s*I\.?\s*$', target_heading.text.strip()):
+        logger.info("  Processing Roman numeral sections I-III (or up to last available)")
+        
+        # 找到所有单独的罗马数字标题
+        roman_headings = []
+        for heading in headings:
+            if re.match(r'^\s*[IVX]+\.?\s*$', heading.text.strip()):
+                # 提取罗马数字部分（去掉可能的点号）
+                roman_text = re.sub(r'\.', '', heading.text.strip())
+                roman_value = target_heading._roman_to_int(roman_text)
+                if 1 <= roman_value <= 10:  # 扩大范围以包含更多罗马数字
+                    roman_headings.append((roman_value, heading))
+        
+        if not roman_headings:
+            logger.warning("  No Roman numeral headings found")
+            return "Roman numeral sections not found", True
+        
+        # 按数值排序
+        roman_headings.sort(key=lambda x: x[0])
+        logger.info(f"  Found Roman numeral headings: {[f'{num}:{heading.text}' for num, heading in roman_headings]}")
+        
+        # 确定要提取的范围：优先提取I-III，如果没有III就提取到最后一个可用的
+        target_romans = []
+        for roman_num, heading in roman_headings:
+            if roman_num <= 3:  # I, II, III
+                target_romans.append((roman_num, heading))
+        
+        # 如果没有找到III，但有其他罗马数字，就提取到最后一个可用的
+        if not any(num == 3 for num, _ in target_romans) and roman_headings:
+            # 找到最大的罗马数字（但不超过合理范围）
+            max_roman = max(roman_headings, key=lambda x: x[0])
+            if max_roman[0] > 3:
+                # 重新定义目标范围：从I到找到的最大罗马数字
+                target_romans = []
+                for roman_num, heading in roman_headings:
+                    if roman_num <= max_roman[0]:
+                        target_romans.append((roman_num, heading))
+        
+        logger.info(f"  Target Roman sections to extract: {[f'{num}:{heading.text}' for num, heading in target_romans]}")
+        
+        if not target_romans:
+            return "No valid Roman numeral sections found", True
+        
+        # 提取所有目标罗马数字section的内容
+        content_parts = []
+        for i, (roman_num, heading) in enumerate(target_romans):
+            # 找下一个标题作为结束点
+            next_heading = None
+            
+            # 首先尝试找下一个罗马数字标题
+            if i + 1 < len(target_romans):
+                next_heading = target_romans[i + 1][1]
+            else:
+                # 如果是最后一个目标罗马数字，找下一个非罗马数字的同级或更高级标题
+                current_pos = heading.position
+                for h in headings:
+                    if h.position > current_pos:
+                        # 检查是否为罗马数字标题
+                        if not re.match(r'^\s*[IVX]+\.?\s*$', h.text.strip()):
+                            # 检查是否为同级或更高级标题
+                            if h.level <= heading.level:
+                                next_heading = h
+                                break
+            
+            section_content = extract_content_between_headings(text, heading, next_heading)
+            if section_content:
+                roman_text = re.sub(r'\.', '', heading.text.strip())  # 移除点号显示
+                content_parts.append(f"Section {roman_text}: {section_content}")
+                logger.info(f"  Extracted Section {roman_text}: {len(section_content)} characters")
+            else:
+                logger.warning(f"  Section {roman_num} is empty")
+        
+        if content_parts:
+            combined_content = " ".join(content_parts)
+            logger.info(f"  Total combined content: {len(combined_content)} characters")
+            return combined_content, False
+        else:
+            return "Roman numeral sections found but empty", True
     
-    content = extract_content_between_headings(text, target_heading, next_heading)
-    
-    if content and len(content) > 20:
-        return content, False
     else:
-        logger.warning("  Background section found but content is too short or empty")
-        return "Background section found but empty", True
+        # 原有逻辑：处理普通的背景或事实标题
+        next_heading = find_next_same_level_heading(target_heading, headings)
+        content = extract_content_between_headings(text, target_heading, next_heading)
+        
+        if content and len(content) > 20:
+            return content, False
+        else:
+            logger.warning("  Background section found but content is too short or empty")
+            return "Background section found but empty", True
 
 def clean_text_for_csv(text: str) -> str:
     """
@@ -624,87 +761,94 @@ def split_into_chunks(text: str, chunk_size: int = 32000) -> List[str]:
     return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 def process_pdf_folder(folder_path: str, output_csv: str):
-    """
-    Process all PDF files in a folder and extract background and synopsis sections.
-    Args:
-        folder_path (str): Path to the folder containing PDF files.
-        output_csv (str): Output CSV file path.
-    Returns:
-        List[dict]: List of result dictionaries for each PDF file.
-    """
-    results = []
-    processing_times = []
-    pdf_files = list(Path(folder_path).glob("*.pdf"))
-    pdf_files.sort()
+   """
+   Process all PDF files in a folder and extract background and synopsis sections.
+   Args:
+       folder_path (str): Path to the folder containing PDF files.
+       output_csv (str): Output CSV file path.
+   Returns:
+       List[dict]: List of result dictionaries for each PDF file.
+   """
+   results = []
+   processing_times = []
+   pdf_files = list(Path(folder_path).glob("*.pdf"))
+   pdf_files.sort()
 
-    logger.info(f"Found {len(pdf_files)} PDF files to process...")
+   logger.info(f"Found {len(pdf_files)} PDF files to process...")
 
-    for i, pdf_file in enumerate(pdf_files, 1):
-        logger.info(f"Processing file {i}/{len(pdf_files)}: {pdf_file.name}")
-        start_time = time.time()
+   for i, pdf_file in enumerate(pdf_files, 1):
+       logger.info(f"Processing file {i}/{len(pdf_files)}: {pdf_file.name}")
+       start_time = time.time()
 
-        full_text, page_info = extract_full_text_from_pdf(pdf_file)
+       full_text, page_info = extract_full_text_from_pdf(pdf_file)
 
-        if not full_text:
-            logger.warning(f"No text extracted from {pdf_file.name}")
-            results.append({
-                'CaseID': extract_case_id_from_filename(pdf_file.name),
-                'filename': pdf_file.name,
-                'Synopsis': 'Text extraction failed',
-                'Background_1': 'Text extraction failed',
-                'StructureCheckFlag': 1
-            })
-            end_time = time.time()
-            processing_time = end_time - start_time
-            processing_times.append(processing_time)
-            logger.info(f"  Processing time: {processing_time:.2f} seconds")
-            continue
+       if not full_text:
+           logger.warning(f"No text extracted from {pdf_file.name}")
+           results.append({
+               'CaseID': extract_case_id_from_filename(pdf_file.name),
+               'filename': pdf_file.name,
+               'Synopsis': 'Text extraction failed',
+               'Background_1': 'Text extraction failed',
+               'StructureCheckFlag': 1
+           })
+           end_time = time.time()
+           processing_time = end_time - start_time
+           processing_times.append(processing_time)
+           logger.info(f"  Processing time: {processing_time:.2f} seconds")
+           continue
 
-        case_id = extract_case_id_from_filename(pdf_file.name)
-        synopsis = extract_synopsis_section(full_text)
-        background, no_structure = extract_background_section(full_text, page_info)
+       case_id = extract_case_id_from_filename(pdf_file.name)
+       synopsis = extract_synopsis_section(full_text)
+       background, no_structure = extract_background_section(full_text, page_info)
 
-        synopsis = clean_text_for_csv(synopsis)
-        background = clean_text_for_csv(background)
+       synopsis = clean_text_for_csv(synopsis)
+       background = clean_text_for_csv(background)
 
-        structure_flag = 1 if no_structure else 0
+       structure_flag = 1 if no_structure else 0
 
-        result_row = {
-            'CaseID': case_id,
-            'filename': pdf_file.name,
-            'Synopsis': synopsis,
-            'StructureCheckFlag': structure_flag
-        }
+       result_row = {
+           'CaseID': case_id,
+           'filename': pdf_file.name,
+           'Synopsis': synopsis,
+           'StructureCheckFlag': structure_flag
+       }
 
-        background_chunks = split_into_chunks(background)
+       background_chunks = split_into_chunks(background)
 
-        for idx, chunk in enumerate(background_chunks):
-            result_row[f'Background_{idx + 1}'] = chunk
+       for idx, chunk in enumerate(background_chunks):
+           result_row[f'Background_{idx + 1}'] = chunk
 
-        logger.info(f"  Results - CaseID: {case_id}, Structure Flag: {structure_flag}")
-        logger.info(f"  Background parts: {len(background_chunks)}")
+       logger.info(f"  Results - CaseID: {case_id}, Structure Flag: {structure_flag}")
+       logger.info(f"  Background parts: {len(background_chunks)}")
 
-        results.append(result_row)
-        
-        end_time = time.time()
-        processing_time = end_time - start_time
-        processing_times.append(processing_time)
-        logger.info(f"  Processing time: {processing_time:.2f} seconds")
+       results.append(result_row)
+       
+       end_time = time.time()
+       processing_time = end_time - start_time
+       processing_times.append(processing_time)
+       logger.info(f"  Processing time: {processing_time:.2f} seconds")
 
-    df = pd.DataFrame(results)
-    df.to_csv(output_csv, index=False, encoding='utf-8', quoting=csv.QUOTE_ALL, escapechar='\\')
-    logger.info(f"Results saved to {output_csv}")
-    
-    if processing_times:
-        avg_time = sum(processing_times) / len(processing_times)
-        total_time = sum(processing_times)
-        logger.info(f"Time statistics:")
-        logger.info(f"  Total processing time: {total_time:.2f} seconds ({total_time/60:.1f} minutes)")
-        logger.info(f"  Average time per file: {avg_time:.2f} seconds")
-        logger.info(f"  Fastest file: {min(processing_times):.2f} seconds")
-        logger.info(f"  Slowest file: {max(processing_times):.2f} seconds")
+   df = pd.DataFrame(results)
+   initial_count = len(df)
+   df = df.drop_duplicates(subset=['CaseID'], keep='last')
+   final_count = len(df)
+   
+   if initial_count > final_count:
+       logger.info(f"Removed {initial_count - final_count} duplicate CaseID entries")
+   
+   df.to_csv(output_csv, index=False, encoding='utf-8', quoting=csv.QUOTE_ALL, escapechar='\\')
+   logger.info(f"Results saved to {output_csv}")
+   
+   if processing_times:
+       avg_time = sum(processing_times) / len(processing_times)
+       total_time = sum(processing_times)
+       logger.info(f"Time statistics:")
+       logger.info(f"  Total processing time: {total_time:.2f} seconds ({total_time/60:.1f} minutes)")
+       logger.info(f"  Average time per file: {avg_time:.2f} seconds")
+       logger.info(f"  Fastest file: {min(processing_times):.2f} seconds")
+       logger.info(f"  Slowest file: {max(processing_times):.2f} seconds")
 
-    return results
+   return results
 
 def main():
     folder_path = "CaseAnalysis_Task"
@@ -714,7 +858,7 @@ def main():
         logger.error("Please modify the folder_path variable to point to your PDF folder.")
         return
     
-    output_csv = "case_extraction_results_1818.csv"
+    output_csv = "cases_New_Code_222.csv"
     results = process_pdf_folder(folder_path, output_csv)
     
     logger.info(f"Processing complete! Extracted information from {len(results)} files.")
